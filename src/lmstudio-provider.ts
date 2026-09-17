@@ -70,6 +70,99 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     this.logger.error(`[Provider] ${msg}`);
   }
 
+  private isAssistantRole(role: vscode.LanguageModelChatMessageRole | string): boolean {
+    return role === vscode.LanguageModelChatMessageRole.Assistant || role === 'assistant';
+  }
+
+  private isUserRole(role: vscode.LanguageModelChatMessageRole | string): boolean {
+    return role === vscode.LanguageModelChatMessageRole.User || role === 'user';
+  }
+
+  private isTextPartLike(part: unknown): part is { value: string } {
+    if (part instanceof vscode.LanguageModelTextPart) {
+      return true;
+    }
+
+    if (typeof part !== 'object' || part === null) {
+      return false;
+    }
+
+    const candidate = part as { value?: unknown };
+    return typeof candidate.value === 'string';
+  }
+
+  private textPartValue(part: unknown): string {
+    if (!this.isTextPartLike(part)) {
+      return '';
+    }
+
+    return part.value;
+  }
+
+  private isToolCallPartLike(part: unknown): part is { callId: string; name: string; input: unknown } {
+    if (part instanceof vscode.LanguageModelToolCallPart) {
+      return true;
+    }
+
+    if (typeof part !== 'object' || part === null) {
+      return false;
+    }
+
+    const candidate = part as { callId?: unknown; name?: unknown; input?: unknown };
+    return typeof candidate.callId === 'string'
+      && typeof candidate.name === 'string'
+      && Object.prototype.hasOwnProperty.call(candidate, 'input');
+  }
+
+  private isToolResultPartLike(part: unknown): part is { callId: string; content: unknown } {
+    if (part instanceof vscode.LanguageModelToolResultPart) {
+      return true;
+    }
+
+    if (typeof part !== 'object' || part === null) {
+      return false;
+    }
+
+    const candidate = part as { callId?: unknown; content?: unknown };
+    return typeof candidate.callId === 'string'
+      && Object.prototype.hasOwnProperty.call(candidate, 'content');
+  }
+
+  private isImageDataPartLike(part: unknown): part is { mimeType: string; data: unknown } {
+    if (part instanceof vscode.LanguageModelDataPart) {
+      return part.mimeType.startsWith('image/');
+    }
+
+    if (typeof part !== 'object' || part === null) {
+      return false;
+    }
+
+    const candidate = part as { mimeType?: unknown; data?: unknown };
+    return typeof candidate.mimeType === 'string'
+      && candidate.mimeType.startsWith('image/')
+      && Object.prototype.hasOwnProperty.call(candidate, 'data');
+  }
+
+  private toBuffer(data: unknown): Buffer | null {
+    if (data instanceof Uint8Array) {
+      return Buffer.from(data);
+    }
+
+    if (ArrayBuffer.isView(data)) {
+      return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    }
+
+    if (data instanceof ArrayBuffer) {
+      return Buffer.from(new Uint8Array(data));
+    }
+
+    if (Array.isArray(data) && data.every((item) => typeof item === 'number')) {
+      return Buffer.from(data);
+    }
+
+    return null;
+  }
+
   // ──────────────────────────────────────────────────────────────────────
   // Model discovery
   // ──────────────────────────────────────────────────────────────────────
@@ -312,9 +405,7 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     }
 
     const parts = Array.isArray(lastMessage.content) ? lastMessage.content : [];
-    const toolResults = parts.filter(
-      (p): p is vscode.LanguageModelToolResultPart => p instanceof vscode.LanguageModelToolResultPart
-    );
+    const toolResults = parts.filter((p): p is { callId: string; content: unknown } => this.isToolResultPartLike(p));
 
     if (toolResults.length === 0) {
       return null;
@@ -344,7 +435,7 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     for (let i = messages.length - 1; i >= 0; i--) {
       const parts = Array.isArray(messages[i].content) ? messages[i].content : [];
       for (const p of parts) {
-        if (p instanceof vscode.LanguageModelToolCallPart && p.callId === callId) {
+        if (this.isToolCallPartLike(p) && p.callId === callId) {
           return p.name;
         }
       }
@@ -407,9 +498,7 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
       const parts = Array.isArray(msg.content) ? msg.content : [];
 
       // ── Tool result parts → role: "tool" ─────────────────────────────
-      const toolResultParts = parts.filter(
-        (p): p is vscode.LanguageModelToolResultPart => p instanceof vscode.LanguageModelToolResultPart
-      );
+      const toolResultParts = parts.filter((p): p is { callId: string; content: unknown } => this.isToolResultPartLike(p));
       if (toolResultParts.length > 0) {
         for (const part of toolResultParts) {
           result.push({
@@ -427,13 +516,11 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
       }
 
       // ── Assistant with tool call parts ───────────────────────────────
-      if (msg.role === vscode.LanguageModelChatMessageRole.Assistant) {
-        const toolCallParts = parts.filter(
-          (p): p is vscode.LanguageModelToolCallPart => p instanceof vscode.LanguageModelToolCallPart
-        );
+      if (this.isAssistantRole(msg.role)) {
+        const toolCallParts = parts.filter((p): p is { callId: string; name: string; input: unknown } => this.isToolCallPartLike(p));
         if (toolCallParts.length > 0) {
           const text = parts
-            .filter((p): p is vscode.LanguageModelTextPart => p instanceof vscode.LanguageModelTextPart)
+            .filter((p): p is { value: string } => this.isTextPartLike(p))
             .map(p => p.value)
             .join('');
 
@@ -477,10 +564,15 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
 
     const parts: ChatMessageContentPart[] = [];
     for (const part of content) {
-      if (part instanceof vscode.LanguageModelTextPart) {
+      if (this.isTextPartLike(part)) {
         parts.push({ type: 'text', text: part.value });
-      } else if (part instanceof vscode.LanguageModelDataPart && part.mimeType.startsWith('image/')) {
-        const base64 = Buffer.from(part.data).toString('base64');
+      } else if (this.isImageDataPartLike(part)) {
+        const bytes = this.toBuffer(part.data);
+        if (!bytes) {
+          continue;
+        }
+
+        const base64 = bytes.toString('base64');
         parts.push({
           type: 'image_url',
           image_url: { url: `data:${part.mimeType};base64,${base64}` }
@@ -568,12 +660,16 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     }));
   }
 
-  private mapRole(role: vscode.LanguageModelChatMessageRole): 'system' | 'user' | 'assistant' {
-    switch (role) {
-      case vscode.LanguageModelChatMessageRole.User: return 'user';
-      case vscode.LanguageModelChatMessageRole.Assistant: return 'assistant';
-      default: return 'user';
+  private mapRole(role: vscode.LanguageModelChatMessageRole | string): 'system' | 'user' | 'assistant' {
+    if (this.isAssistantRole(role)) {
+      return 'assistant';
     }
+
+    if (this.isUserRole(role)) {
+      return 'user';
+    }
+
+    return 'user';
   }
 
   private extractMessageContent(msg: vscode.LanguageModelChatRequestMessage): string {
@@ -581,7 +677,7 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) {
       return content
-        .filter((p): p is vscode.LanguageModelTextPart => p instanceof vscode.LanguageModelTextPart)
+        .filter((p): p is { value: string } => this.isTextPartLike(p))
         .map(p => p.value)
         .join('');
     }
@@ -592,7 +688,7 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) {
       return content.map(c => {
-        if (c instanceof vscode.LanguageModelTextPart) return c.value;
+        if (this.isTextPartLike(c)) return c.value;
         if (typeof c === 'object' && c !== null && 'value' in c) return String((c as { value: unknown }).value);
         return typeof c === 'string' ? c : JSON.stringify(c);
       }).join('');

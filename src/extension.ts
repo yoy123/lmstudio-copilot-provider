@@ -65,15 +65,16 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(outputChannel);
 
   const logger = new Logger(outputChannel);
+  const isRemoteExtensionHost = Boolean(vscode.env.remoteName);
 
   logger.info(`LM Studio Copilot Provider is activating... v${context.extension.packageJSON.version}`);
-  if (logger.shouldShow) {
-    outputChannel.show(true);
+  if (isRemoteExtensionHost) {
+    logger.info(`Remote extension host detected (${vscode.env.remoteName}); skipping BYOK utility model auto-fix.`);
+  } else {
+    void applyByokUtilityModelAutoFix(logger).catch((error) => {
+      logger.warn(`BYOK utility model auto-fix skipped due to error: ${error}`);
+    });
   }
-
-  void applyByokUtilityModelAutoFix(logger).catch((error) => {
-    logger.warn(`BYOK utility model auto-fix skipped due to error: ${error}`);
-  });
 
   const registerProvider = (): void => {
     registration?.dispose();
@@ -243,17 +244,28 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Auto-refresh models on startup if enabled
+  // Auto-start / refresh run in background so extension activation stays fast.
   const config = vscode.workspace.getConfiguration('lmstudio-copilot');
-  if (config.get<boolean>('autoStartServer', true)) {
-    logger.info('Auto-start server enabled, ensuring LM Studio is running...');
-    await ensureServerRunning(true);
-  }
+  const allowStartupTasksOnRemote = config.get<boolean>('allowStartupTasksOnRemote', false);
 
-  if (config.get<boolean>('autoRefreshModels', true)) {
-    logger.info('Auto-refresh enabled, refreshing models now...');
-    await provider?.refreshModels();
-  }
+  void (async () => {
+    if (isRemoteExtensionHost && !allowStartupTasksOnRemote) {
+      logger.info('Skipping auto-start and auto-refresh on remote extension host. Set lmstudio-copilot.allowStartupTasksOnRemote=true to re-enable.');
+      return;
+    }
+
+    if (config.get<boolean>('autoStartServer', true)) {
+      logger.info('Auto-start server enabled, ensuring LM Studio is running...');
+      await ensureServerRunning(true);
+    }
+
+    if (config.get<boolean>('autoRefreshModels', true)) {
+      logger.info('Auto-refresh enabled, refreshing models now...');
+      await provider?.refreshModels();
+    }
+  })().catch((error) => {
+    logger.warn(`Startup background tasks failed: ${error}`);
+  });
 
   logger.info(`LM Studio Copilot Provider activated v${context.extension.packageJSON.version}`);
 }

@@ -52,6 +52,7 @@ const XML_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
  */
 export class LMStudioClient {
   private abortControllers = new Map<string, AbortController>();
+  private modelLoadPromises = new Map<string, Promise<boolean>>();
   private resolvedCliPath: string | null | undefined;
 
   constructor(private logger: Logger) {}
@@ -220,6 +221,13 @@ export class LMStudioClient {
   }
 
   private mapLocalModel(model: LMStudioLocalModel, loaded: boolean): LMStudioModel {
+    const maxContextLength =
+      typeof model.maxContextLength === 'number'
+        ? model.maxContextLength
+        : typeof model.max_context_length === 'number'
+          ? model.max_context_length
+          : undefined;
+
     return {
       id: model.modelKey,
       object: 'model',
@@ -231,6 +239,12 @@ export class LMStudioClient {
       path: model.path,
       format: model.format,
       paramsString: model.paramsString,
+      architecture: model.architecture,
+      max_context_length: maxContextLength,
+      capabilities: {
+        vision: Boolean(model.vision),
+        trained_for_tool_use: Boolean(model.trainedForToolUse),
+      },
     };
   }
 
@@ -424,6 +438,22 @@ export class LMStudioClient {
   }
 
   async ensureModelLoaded(modelId: string): Promise<boolean> {
+    const existingLoadPromise = this.modelLoadPromises.get(modelId);
+    if (existingLoadPromise) {
+      this.log(`Waiting for in-flight model load: ${modelId}`);
+      return existingLoadPromise;
+    }
+
+    const loadPromise = this.ensureModelLoadedInternal(modelId)
+      .finally(() => {
+        this.modelLoadPromises.delete(modelId);
+      });
+
+    this.modelLoadPromises.set(modelId, loadPromise);
+    return loadPromise;
+  }
+
+  private async ensureModelLoadedInternal(modelId: string): Promise<boolean> {
     if (!this.isLocalServerUrl()) {
       const serverReady = await this.checkConnection();
       if (!serverReady) {

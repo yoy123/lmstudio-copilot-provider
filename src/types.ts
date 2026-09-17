@@ -65,6 +65,11 @@ export interface LMStudioLocalModel {
   indexedModelIdentifier?: string;
   deviceIdentifier?: string;
   paramsString?: string;
+  architecture?: string;
+  vision?: boolean;
+  trainedForToolUse?: boolean;
+  maxContextLength?: number;
+  max_context_length?: number;
   [prop: string]: unknown;
 }
 
