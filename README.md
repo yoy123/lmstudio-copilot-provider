@@ -79,6 +79,7 @@ If the VS Code GUI for adding a custom chat model is bugged, you can fall back t
 ```
 
 Replace the model `id`, display `name`, and `url` with the values exposed by your LM Studio server. Set `toolCalling` and `vision` to match the capabilities of the model you are exposing.
+`maxInputTokens` should be the model's total context window. Copilot Chat reserves `maxOutputTokens` from that total for the response when calculating prompt capacity.
 
 ## About The CLI
 

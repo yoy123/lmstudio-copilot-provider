@@ -70,6 +70,27 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     this.logger.error(`[Provider] ${msg}`);
   }
 
+  private resolveTokenBudgets(
+    configuredContextWindow: number,
+    configuredMaxOutputTokens: number,
+    modelContextWindow?: number
+  ): { maxInputTokens: number; maxOutputTokens: number } {
+    const contextWindow = Math.max(
+      modelContextWindow
+        ? Math.min(configuredContextWindow, modelContextWindow)
+        : configuredContextWindow,
+      1
+    );
+    const maxOutputTokens = contextWindow > 1
+      ? Math.min(Math.max(configuredMaxOutputTokens, 1), contextWindow - 1)
+      : 0;
+
+    return {
+      maxInputTokens: Math.max(contextWindow - maxOutputTokens, 1),
+      maxOutputTokens,
+    };
+  }
+
   // ──────────────────────────────────────────────────────────────────────
   // Model discovery
   // ──────────────────────────────────────────────────────────────────────
@@ -124,28 +145,35 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     this.log(`provideLanguageModelChatInformation: ${this.availableModels.length} models`);
 
     const config = vscode.workspace.getConfiguration('lmstudio-copilot');
-    const configuredMaxInputTokens = config.get<number>('maxInputTokens', 131072);
-    const maxOutputTokens = config.get<number>('maxOutputTokens', 32663);
+    const configuredContextWindow = config.get<number>('maxInputTokens', 131072);
+    const configuredMaxOutputTokens = config.get<number>('maxOutputTokens', 16384);
     const enableToolCalling = config.get<boolean>('enableToolCalling', true);
 
-    return this.availableModels.map(model => ({
-      id: model.id,
-      name: this.getDisplayName(model),
-      family: 'lmstudio',
-      version: '1.0.0',
-      // Honor the configured input-token cap while never exceeding model limits.
-      maxInputTokens: model.max_context_length
-        ? Math.min(configuredMaxInputTokens, model.max_context_length)
-        : configuredMaxInputTokens,
-      maxOutputTokens,
-      lmstudioModelId: model.id,
-      isLoaded: Boolean(model.loaded),
-      isUserSelectable: true,
-      capabilities: {
-        toolCalling: enableToolCalling,
-        imageInput: model.capabilities?.vision ?? false,
-      },
-    }));
+    return this.availableModels.map(model => {
+      const budgets = this.resolveTokenBudgets(
+        configuredContextWindow,
+        configuredMaxOutputTokens,
+        model.max_context_length
+      );
+
+      return {
+        id: model.id,
+        name: this.getDisplayName(model),
+        family: 'lmstudio',
+        version: '1.0.0',
+        // VS Code displays total context as maxInputTokens + maxOutputTokens, so
+        // advertise the prompt budget after reserving response tokens.
+        maxInputTokens: budgets.maxInputTokens,
+        maxOutputTokens: budgets.maxOutputTokens,
+        lmstudioModelId: model.id,
+        isLoaded: Boolean(model.loaded),
+        isUserSelectable: true,
+        capabilities: {
+          toolCalling: enableToolCalling,
+          imageInput: model.capabilities?.vision ?? false,
+        },
+      };
+    });
   }
 
   // ──────────────────────────────────────────────────────────────────────

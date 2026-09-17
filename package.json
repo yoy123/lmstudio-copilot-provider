@@ -158,13 +158,13 @@
             "type": "number",
             "default": 131072,
             "order": 4,
-            "description": "Maximum input tokens (context window size). Default is 128k."
+            "description": "Maximum total context window in tokens. The extension reserves `maxOutputTokens` from this total when reporting prompt capacity to Copilot Chat. Default is 128k."
           },
           "lmstudio-copilot.maxOutputTokens": {
             "type": "number",
             "default": 16384,
             "order": 5,
-            "description": "Maximum output tokens. Default is 16k."
+            "description": "Maximum response/output tokens reserved within the total context window. Default is 16k."
           },
           "lmstudio-copilot.maxTools": {
             "type": "number",
