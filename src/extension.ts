@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import { LMStudioProvider } from './lmstudio-provider';
 import { LMStudioClient } from './lmstudio-client';
+import { LMStudioInlineCompletionProvider } from './inline-completion-provider';
 import { Logger } from './logger';
 import { registerAllTools } from './tools/index';
 
 let provider: LMStudioProvider | undefined;
 let registration: vscode.Disposable | undefined;
+let inlineCompletionRegistration: vscode.Disposable | undefined;
 let outputChannel: vscode.OutputChannel;
 let lmStudioTerminal: vscode.Terminal | undefined;
 let client: LMStudioClient;
@@ -79,12 +81,20 @@ export async function activate(context: vscode.ExtensionContext) {
   const registerProvider = (): void => {
     registration?.dispose();
     provider?.dispose();
+    inlineCompletionRegistration?.dispose();
 
     client = new LMStudioClient(logger);
     provider = new LMStudioProvider(client, context, logger);
+    const inlineProvider = new LMStudioInlineCompletionProvider(client, logger);
 
     registration = vscode.lm.registerLanguageModelChatProvider('lmstudio', provider);
+    inlineCompletionRegistration = vscode.languages.registerInlineCompletionItemProvider(
+      [{ pattern: '**', scheme: 'file' }, { pattern: '**', scheme: 'untitled' }, { pattern: '**', scheme: 'vscode-remote' }],
+      inlineProvider,
+    );
+
     logger.info('✅ Provider registered successfully with vendor: lmstudio');
+    logger.info('✅ Inline completion provider registered');
   };
 
   registerProvider();
@@ -273,6 +283,8 @@ export async function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
   registration?.dispose();
   registration = undefined;
+  inlineCompletionRegistration?.dispose();
+  inlineCompletionRegistration = undefined;
   lmStudioTerminal?.dispose();
   lmStudioTerminal = undefined;
   provider?.dispose();

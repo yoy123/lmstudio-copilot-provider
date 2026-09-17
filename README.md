@@ -14,6 +14,7 @@ Install from the VS Code Marketplace:
 - Streams responses directly into VS Code chat
 - Can auto-start LM Studio and lazy-load the selected model on first use (when using localhost)
 - Supports remote LM Studio servers without local CLI dependencies
+- Adds optional LM Studio-powered inline autocompletion (ghost text)
 
 ## Requirements
 
@@ -105,6 +106,8 @@ Most users can leave the defaults alone. These are the settings that matter most
 - `lmstudio-copilot.launchCommand`: Fallback terminal command if CLI-based startup is unavailable
 - `lmstudio-copilot.enableToolCalling`: Enable tool calling for supported models
 - `lmstudio-copilot.maxTools`: Limit the number of tools exposed per request
+- `lmstudio-copilot.enableInlineCompletions`: Enable experimental inline completion suggestions
+- `lmstudio-copilot.inlineCompletionModel`: Optional model ID for inline suggestions (blank = auto-pick)
 - `lmstudio-copilot.imageGenEndpointUrl`: Base URL for DALL-E/OpenAI-compatible or A1111 image generation
 - `lmstudio-copilot.imageGenApiKey`: Dedicated API key for image generation backends such as OpenAI DALL-E
 - `lmstudio-copilot.logLevel`: Controls output logging verbosity. Default is `verbose`; set to `info`, `warning`, `error`, or `none`.
@@ -124,6 +127,21 @@ Select an LM Studio model in Copilot Chat and start chatting. The extension will
 
 - Tool calling for supported local models
 - Optional image generation through A1111 or DALL-E-compatible endpoints
+
+### Inline Autocompletion (Experimental)
+
+Inline completion support is available and off by default.
+
+Enable it with:
+
+```json
+{
+  "lmstudio-copilot.enableInlineCompletions": true,
+  "lmstudio-copilot.inlineCompletionModel": ""
+}
+```
+
+When `inlineCompletionModel` is empty, the extension auto-picks the first available non-embedding model.
 
 ### DALL-E Setup
 

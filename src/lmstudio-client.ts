@@ -12,6 +12,7 @@ import {
   ChatMessageContentPart,
   ChatCompletionRequest,
   ChatCompletionChunk,
+  ChatCompletionResponse,
   ChatTool,
   ToolCall,
   getConfig,
@@ -480,6 +481,123 @@ export class LMStudioClient {
     }
 
     return this.waitForModelAvailability(modelId, Math.max(this.getConfig().requestTimeout, 10 * 60 * 1000));
+  }
+
+  private extractMessageText(content: string | ChatMessageContentPart[] | null): string {
+    if (!content) {
+      return '';
+    }
+
+    if (typeof content === 'string') {
+      return content;
+    }
+
+    return content
+      .filter((part): part is Extract<ChatMessageContentPart, { type: 'text' }> => part.type === 'text')
+      .map((part) => part.text)
+      .join('');
+  }
+
+  async getInlineCompletion(
+    modelId: string,
+    prefix: string,
+    suffix: string,
+    options: {
+      languageId?: string;
+      maxTokens?: number;
+      temperature?: number;
+      timeoutMs?: number;
+    } = {},
+    token?: vscode.CancellationToken,
+  ): Promise<string | null> {
+    const config = this.getConfig();
+    const timeoutMs = Math.min(
+      Math.max(options.timeoutMs ?? config.requestTimeout, 1000),
+      30000,
+    );
+    const maxTokens = Math.max(1, Math.floor(options.maxTokens ?? 96));
+    const temperature = Number.isFinite(options.temperature) ? options.temperature : 0.2;
+
+    const requestBody: ChatCompletionRequest = {
+      model: modelId,
+      stream: false,
+      max_tokens: maxTokens,
+      temperature,
+      enable_thinking: false,
+      reasoning_effort: 'none',
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'You are an inline code completion engine.',
+            'Return only the code to insert at the cursor.',
+            'Do not explain your answer.',
+            'Do not wrap the output in markdown fences.',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: [
+            `Language: ${options.languageId ?? 'unknown'}`,
+            'Complete the code at <cursor>.',
+            'Return only the inserted text.',
+            '',
+            '<before>',
+            prefix,
+            '</before>',
+            '',
+            '<after>',
+            suffix,
+            '</after>',
+          ].join('\n'),
+        },
+      ],
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const cancelDisposable = token?.onCancellationRequested(() => controller.abort());
+
+    try {
+      const response = await fetch(`${config.serverUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const responseText = await response.text();
+        this.warn(`Inline completion request failed (${response.status}): ${responseText.slice(0, 300)}`);
+        return null;
+      }
+
+      const payload = await response.json() as ChatCompletionResponse;
+      const firstChoice = payload.choices?.[0];
+      if (!firstChoice) {
+        return null;
+      }
+
+      const text = this.extractMessageText(firstChoice.message.content)
+        .replace(/\r\n/g, '\n')
+        .replace(/<\|(endoftext|im_end|end_of_turn|eot_id)\|>/g, '')
+        .trimEnd();
+
+      return text.length > 0 ? text : null;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return null;
+      }
+
+      this.warn(`Inline completion request error: ${error}`);
+      return null;
+    } finally {
+      clearTimeout(timeout);
+      cancelDisposable?.dispose();
+    }
   }
 
   // ── Streaming chat completion ─────────────────────────────────────────
