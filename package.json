@@ -3,7 +3,7 @@
   "name": "lmstudio-copilot-provider",
   "displayName": "LM Studio for Copilot Chat",
   "description": "Use local LM Studio models inside VS Code Copilot Chat with streaming, tool calling, and optional image generation.",
-  "version": "1.30.6",
+  "version": "1.30.7",
   "publisher": "DanLambiase",
   "license": "MIT",
   "repository": {

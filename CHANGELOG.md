@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.30.7] - 2026-09-17
+
+### Change 26
+
+- Added experimental LM Studio inline autocompletion support with configurable model, context budget, timeout, and temperature settings.
+- Fixed race conditions in on-demand model loading so concurrent requests no longer trigger duplicate model load operations.
+- Fixed startup UX by preventing Output panel focus hijacking and hardening remote-host startup behavior.
+- Improved context/token reporting and chat message-part parsing reliability across VS Code host/runtime variations.
+
 ## [1.30.6] - 2026-08-16
 
 ### Change 25
