@@ -147,12 +147,25 @@ export interface ChatCompletionRequest {
   frequency_penalty?: number;
   presence_penalty?: number;
   stop?: string[];
+  stream_options?: { include_usage: boolean };
   tools?: ChatTool[];
   tool_choice?: 'none' | 'auto' | { type: 'function'; function: { name: string } };
   /** Qwen3 / thinking models: set false to skip generating a reasoning trace */
   enable_thinking?: boolean;
   /** OpenAI-style reasoning effort hint for models that support it (e.g. o1, o3, QwQ) */
   reasoning_effort?: 'none' |'low' | 'medium' | 'high';
+}
+
+/**
+ * Token usage reported by LM Studio (OpenAI-compatible shape)
+ */
+export interface ChatCompletionUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens?: number;
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+  };
 }
 
 /**
@@ -180,6 +193,7 @@ export interface ChatCompletionChunk {
     };
     finish_reason: string | null;
   }[];
+  usage?: ChatCompletionUsage;
 }
 
 /**
@@ -195,11 +209,7 @@ export interface ChatCompletionResponse {
     message: ChatMessage;
     finish_reason: string;
   }[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  usage?: ChatCompletionUsage;
 }
 
 /**

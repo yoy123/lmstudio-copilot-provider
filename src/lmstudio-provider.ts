@@ -70,6 +70,16 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     this.logger.error(`[Provider] ${msg}`);
   }
 
+  /**
+   * True when the running VS Code version can decode a `usage` data part from
+   * our stream into session token accounting (verified on 1.140). On older
+   * versions we skip emitting it so it doesn't surface as a stray attachment.
+   */
+  private static supportsUsageReporting(): boolean {
+    const [major, minor] = vscode.version.split('.').map((part) => parseInt(part, 10));
+    return major > 1 || (major === 1 && minor >= 140);
+  }
+
   private isAssistantRole(role: vscode.LanguageModelChatMessageRole | string): boolean {
     return role === vscode.LanguageModelChatMessageRole.Assistant || role === 'assistant';
   }
@@ -188,6 +198,9 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
         loaded: true,
         display_name: model.display_name ?? existing?.display_name,
         publisher: model.publisher ?? existing?.publisher,
+        // The live API entry may omit the context length (e.g. older server
+        // shapes) — don't clobber a known value from `lms ls` with undefined.
+        max_context_length: model.max_context_length ?? existing?.max_context_length,
       });
     }
 
@@ -216,8 +229,13 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
   ): vscode.ProviderResult<LMStudioModelInfo[]> {
     this.log(`provideLanguageModelChatInformation: ${this.availableModels.length} models`);
 
+    // Conservative input cap for models that don't report a context length.
+    // Keeps the session-usage widget (and auto-compaction) functional instead
+    // of assuming an unbounded window.
+    const FALLBACK_MAX_INPUT_TOKENS = 32768;
+
     const config = vscode.workspace.getConfiguration('lmstudio-copilot');
-    const configuredMaxInputTokens = config.get<number>('maxInputTokens', 131072);
+    const configuredMaxInputTokens = config.get<number>('maxInputTokens', 1048576);
     const maxOutputTokens = config.get<number>('maxOutputTokens', 32663);
     const enableToolCalling = config.get<boolean>('enableToolCalling', true);
 
@@ -226,10 +244,12 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
       name: this.getDisplayName(model),
       family: 'lmstudio',
       version: '1.0.0',
-      // Honor the configured input-token cap while never exceeding model limits.
-      maxInputTokens: model.max_context_length
+      // Report the model's real context window (capped by the user setting).
+      // The default cap is 1M so models that advertise e.g. 256K are not
+      // clamped to a smaller number.
+      maxInputTokens: typeof model.max_context_length === 'number' && model.max_context_length > 0
         ? Math.min(configuredMaxInputTokens, model.max_context_length)
-        : configuredMaxInputTokens,
+        : Math.min(configuredMaxInputTokens, FALLBACK_MAX_INPUT_TOKENS),
       maxOutputTokens,
       lmstudioModelId: model.id,
       isLoaded: Boolean(model.loaded),
@@ -342,7 +362,17 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
       for await (const part of stream) {
         if (token.isCancellationRequested) break;
 
-        if ('text' in part) {
+        if ('usage' in part && LMStudioProvider.supportsUsageReporting()) {
+          // Report token usage to VS Code so the session context-usage widget
+          // (and auto-compaction) can account for this turn. The BYOK bridge
+          // decodes a data part with mimeType "usage" as JSON containing
+          // prompt_tokens / completion_tokens.
+          const usagePayload: Record<string, unknown> = {
+            prompt_tokens: part.usage.prompt_tokens,
+            completion_tokens: part.usage.completion_tokens,
+          };
+          progress.report(vscode.LanguageModelDataPart.json(usagePayload, 'usage'));
+        } else if ('text' in part) {
           progress.report(new vscode.LanguageModelTextPart(part.text));
         } else if ('toolCall' in part) {
           const tc = part.toolCall;
