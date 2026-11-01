@@ -3,6 +3,7 @@
 .snapshots/**
 out/**
 src/**
+tests/**
 node_modules/**
 .env
 .gitignore

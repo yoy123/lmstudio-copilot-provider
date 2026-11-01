@@ -204,6 +204,22 @@ Then run **Developer: Reload Window**.
 - Consider using a smaller/faster model
 - Increase the timeout in settings if needed
 
+### Context limits and session usage
+
+`lmstudio-copilot.maxInputTokens` caps the input window advertised to Copilot.
+Its default is 1,048,576 tokens, but each model's reported context length still
+limits that value. Models without context metadata use a conservative 32,768-token
+fallback. An explicit smaller setting is always respected.
+
+A model's supported context maximum is not necessarily its loaded context size.
+Check the context configured in LM Studio before increasing this setting; the
+extension uses loaded-instance context metadata when the server provides it.
+
+On VS Code 1.140 and later, token usage returned by LM Studio is forwarded to
+Copilot's session accounting. Older VS Code versions skip that data part for
+compatibility. If the server does not return usage, the extension does not invent
+counts. Increasing the context cap alone does not enable usage reporting.
+
 ### Gemma reasoning text appears in chat
 
 Some Gemma-family models may stream channel-style thinking markers instead of standard OpenAI-style hidden reasoning.
@@ -226,6 +242,9 @@ npm install
 
 # Compile and watch
 npm run watch
+
+# Run isolated regression tests (no running LM Studio server required)
+npm test
 
 # Package the extension
 npm run package

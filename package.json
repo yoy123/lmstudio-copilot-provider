@@ -619,7 +619,7 @@
     "publish:vsce": "vsce publish",
     "publish:ovsx": "npx --yes ovsx publish",
     "lint": "eslint src",
-    "test": "node ./out/test/runTest.js"
+    "test": "node --test tests/*.test.cjs"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
