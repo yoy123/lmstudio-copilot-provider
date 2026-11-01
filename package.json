@@ -162,9 +162,9 @@
           },
           "lmstudio-copilot.maxInputTokens": {
             "type": "number",
-            "default": 131072,
+            "default": 1048576,
             "order": 4,
-            "description": "Maximum input tokens (context window size). Default is 128k."
+            "description": "Maximum input tokens (context window size). Defaults to 1M, which effectively means 'no cap' — each model's own reported context length still applies. Lower this if you want to force a smaller window for memory or compaction reasons."
           },
           "lmstudio-copilot.maxOutputTokens": {
             "type": "number",

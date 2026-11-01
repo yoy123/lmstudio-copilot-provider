@@ -24,7 +24,8 @@ import {
 
 export type StreamPart =
   | { text: string }
-  | { toolCall: ToolCall };
+  | { toolCall: ToolCall }
+  | { usage: { prompt_tokens: number; completion_tokens: number } };
 
 interface ThinkState {
   tag: string | null;
@@ -655,6 +656,9 @@ export class LMStudioClient {
       max_tokens: options.maxTokens ?? 32663,
       top_p: options.topP ?? 1,
       stop: options.stop,
+      // Ask LM Studio to include token usage in the final stream chunk so we can
+      // report accurate context accounting back to VS Code.
+      stream_options: { include_usage: true },
     };
     const clientConfig = vscode.workspace.getConfiguration('lmstudio-copilot');
     const enableThinking = clientConfig.get<boolean>('enableThinking', true);
@@ -737,6 +741,7 @@ export class LMStudioClient {
     const gemmaChannelState: GemmaChannelState = { insideThought: false, pending: '' };
     let holdBuffer = '';          // text held while waiting for </tool_call>
     let toolCallYielded = false;  // tracks whether ANY tool call was emitted this turn
+    let lastUsage: { prompt_tokens: number; completion_tokens: number } | undefined;
 
     // OpenAI-style tool calls assembled from deltas
     const oaiToolCalls = new Map<number, { id: string; name: string; args: string }>();
@@ -777,6 +782,13 @@ export class LMStudioClient {
           if (!line.startsWith('data: ')) continue;
           let chunk: ChatCompletionChunk;
           try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
+
+          // Capture token usage (LM Studio sends it in a final chunk with empty choices).
+          if (chunk.usage
+            && typeof chunk.usage.prompt_tokens === 'number'
+            && typeof chunk.usage.completion_tokens === 'number') {
+            lastUsage = { prompt_tokens: chunk.usage.prompt_tokens, completion_tokens: chunk.usage.completion_tokens };
+          }
 
           const choice = chunk.choices?.[0];
           if (!choice) continue;
@@ -850,7 +862,12 @@ export class LMStudioClient {
         }
       }
 
-      // Stream ended — flush remaining
+      // Stream ended — report token usage first so VS Code can account for it,
+      // then flush any remaining text/tool calls.
+      if (lastUsage) {
+        this.log(`Stream usage: prompt=${lastUsage.prompt_tokens} completion=${lastUsage.completion_tokens}`);
+        yield { usage: lastUsage };
+      }
       if (holdBuffer) yield* this.flushHoldBuffer(holdBuffer, toolCallYielded);
       for (const [, tc] of oaiToolCalls) {
         if (tc.id && tc.name) {
