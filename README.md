@@ -43,6 +43,8 @@ You can connect to an LM Studio server running on a remote machine:
 
 This is useful for setups where LM Studio runs on a dedicated server or in a container.
 
+OpenAI-compatible servers such as Strata are also supported. Set `lmstudio-copilot.serverUrl` to the server's base URL; model discovery tries LM Studio's `/api/v1/models` and `/api/v0/models` before `/v1/models`. Chat requests use `/v1/chat/completions`.
+
 ### SSH tunnelling ("looks-local" remote server)
 
 If you tunnel a remote LM Studio over SSH, its URL on your local machine is still `http://localhost:1234`. The extension would normally treat this as a local installation and attempt CLI operations, which will fail because LM Studio is not actually installed locally.
