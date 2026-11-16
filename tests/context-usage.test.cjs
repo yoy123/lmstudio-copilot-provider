@@ -130,6 +130,62 @@ test('API discovery uses the smallest valid loaded-instance context', async () =
   assert.equal(models[0].max_context_length, 16384);
 });
 
+test('model discovery falls back to OpenAI endpoints and local readiness skips the LM Studio CLI', async () => {
+  settings.serverUrl = 'http://127.0.0.1:8080/';
+  settings.apiKey = 'test-key';
+  const requests = [];
+  global.fetch = async (url, init) => {
+    requests.push([url, init.headers.Authorization]);
+    if (!url.endsWith('/v1/models') || url.includes('/api/')) return new Response('', { status: 404 });
+    return Response.json({ data: [model(8192)] });
+  };
+  const client = new LMStudioClient(logger);
+  client.execLms = async () => { throw new Error('LM Studio CLI must not be used'); };
+  assert.equal((await client.getModels())[0].id, 'test-model');
+  assert.equal(await client.checkConnection(), true);
+  assert.equal(await client.ensureModelLoaded('test-model'), true);
+  assert.deepEqual(requests.slice(0, 3).map(([url]) => url), [
+    'http://127.0.0.1:8080/api/v1/models',
+    'http://127.0.0.1:8080/api/v0/models',
+    'http://127.0.0.1:8080/v1/models',
+  ]);
+  assert.ok(requests.every(([, authorization]) => authorization === ['Bearer', settings.apiKey].join(' ')));
+});
+
+test('discovery rejects invalid responses and accepts empty legacy model lists', async () => {
+  const paths = [];
+  global.fetch = async url => {
+    paths.push(new URL(url).pathname);
+    if (paths.length === 1) return Response.json({ error: 'not a model list' });
+    return Response.json({ data: [] });
+  };
+  const client = new LMStudioClient(logger);
+  assert.deepEqual(await client.getModels(), []);
+  assert.deepEqual(paths, ['/api/v1/models', '/api/v0/models']);
+});
+
+test('discovery reports failure after all endpoints fail', async () => {
+  const paths = [];
+  global.fetch = async url => {
+    paths.push(new URL(url).pathname);
+    if (paths.length === 1) throw new TypeError('fetch failed');
+    return new Response('', { status: 404 });
+  };
+  const client = new LMStudioClient(logger);
+  assert.equal(await client.checkConnection(), false);
+  assert.deepEqual(paths, ['/api/v1/models', '/api/v0/models', '/v1/models']);
+});
+
+test('native local servers retain CLI model loading', async () => {
+  global.fetch = async () => Response.json({ models: [{ key: 'test-model' }] });
+  const client = new LMStudioClient(logger);
+  let loaded = false;
+  client.getLoadedModelIds = async () => new Set();
+  client.execLms = async args => { loaded = args[0] === 'load'; return { exitCode: 0 }; };
+  assert.equal(await client.ensureModelLoaded('test-model'), true);
+  assert.equal(loaded, true);
+});
+
 test('empty-choice usage survives byte-split SSE and is emitted once', async () => {
   const client = new LMStudioClient(logger);
   const usage = { prompt_tokens: 321, completion_tokens: 12 };

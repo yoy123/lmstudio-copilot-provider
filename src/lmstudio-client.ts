@@ -8,6 +8,7 @@ import {
   LMStudioLocalModel,
   LMStudioModel,
   LMStudioRawModel,
+  ModelsResponse,
   ChatMessage,
   ChatMessageContentPart,
   ChatCompletionRequest,
@@ -56,6 +57,7 @@ export class LMStudioClient {
   private abortControllers = new Map<string, AbortController>();
   private modelLoadPromises = new Map<string, Promise<boolean>>();
   private resolvedCliPath: string | null | undefined;
+  private modelEndpoint: { serverUrl: string; path: string } | undefined;
 
   constructor(private logger: Logger) {}
 
@@ -302,43 +304,48 @@ export class LMStudioClient {
 
   // ── Connection check ──────────────────────────────────────────────────
 
-  async checkConnection(): Promise<boolean> {
+  private async fetchModels(timeoutMs: number): Promise<ModelsResponse | LMStudioModel[] | undefined> {
     const config = this.getConfig();
-    this.log(`Checking connection to ${config.serverUrl}...`);
-    try {
-      const r = await fetch(`${config.serverUrl}/api/v1/models`, {
-        method: 'GET',
-        headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {},
-        signal: AbortSignal.timeout(5000),
-      });
-      this.log(`Connection check: ${r.status}`);
-      return r.ok;
-    } catch (e) {
-      this.error(`Connection check failed: ${e}`);
-      return false;
+    for (const endpoint of ['/api/v1/models', '/api/v0/models', '/v1/models']) {
+      const url = `${config.serverUrl.replace(/\/+$/, '')}${endpoint}`;
+      this.log(`Fetching models from ${url}...`);
+      try {
+        const r = await fetch(url, {
+          method: 'GET',
+          headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {},
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+        const raw = await r.json() as ModelsResponse | LMStudioModel[] | null;
+        if (!Array.isArray(raw) && !Array.isArray(raw?.models) && !Array.isArray(raw?.data)) {
+          throw new Error('Unexpected models response');
+        }
+        this.modelEndpoint = { serverUrl: config.serverUrl, path: endpoint };
+        return raw;
+      } catch (error) {
+        this.log(`Failed ${url}: ${error}`);
+      }
     }
+    this.modelEndpoint = undefined;
+    return undefined;
+  }
+
+  async checkConnection(): Promise<boolean> {
+    return (await this.fetchModels(5000)) !== undefined;
   }
 
   // ── Model listing ─────────────────────────────────────────────────────
 
   async getModels(): Promise<LMStudioModel[]> {
-    const config = this.getConfig();
-    this.log(`Fetching models from ${config.serverUrl}/api/v1/models...`);
     try {
-      const r = await fetch(`${config.serverUrl}/api/v1/models`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-        },
-        signal: AbortSignal.timeout(config.requestTimeout),
-      });
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      const raw = await r.json();
+      const raw = await this.fetchModels(this.getConfig().requestTimeout);
+      if (raw === undefined) throw new Error('No compatible models endpoint found');
       this.log(`Raw models: ${JSON.stringify(raw).slice(0, 500)}`);
 
       let models: LMStudioModel[];
-      if (raw?.models && Array.isArray(raw.models)) {
+      if (Array.isArray(raw)) {
+        models = raw;
+      } else if (raw.models && Array.isArray(raw.models)) {
         const rawModels = (raw.models as LMStudioRawModel[]).filter(m => m.type !== 'embedding');
         models = rawModels.map((m) => {
           const loadedContextLength = this.getLoadedContextLength(m);
@@ -350,8 +357,6 @@ export class LMStudioClient {
           };
         });
         this.log(`Filtered ${raw.models.length} -> ${models.length} LLM models`);
-      } else if (Array.isArray(raw)) {
-        models = raw;
       } else if (raw?.data && Array.isArray(raw.data)) {
         models = raw.data;
       } else {
@@ -497,6 +502,10 @@ export class LMStudioClient {
     if (!serverReady) {
       this.error(`Cannot load model ${modelId} because the LM Studio server is unavailable`);
       return false;
+    }
+
+    if (this.modelEndpoint?.serverUrl === this.getConfig().serverUrl && this.modelEndpoint.path === '/v1/models') {
+      return this.waitForModelAvailability(modelId, Math.max(this.getConfig().requestTimeout, 10 * 60 * 1000));
     }
 
     const loadedModelIds = await this.getLoadedModelIds();
