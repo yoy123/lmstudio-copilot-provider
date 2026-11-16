@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { LMStudioClient } from './lmstudio-client';
 import { Logger } from './logger';
+import { normalizeToolParameters } from './tool-schema';
 import { LMStudioModel, ChatMessage, ChatTool, ChatMessageContentPart } from './types';
 
 /**
@@ -232,33 +233,47 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     // Conservative input cap for models that don't report a context length.
     // Keeps the session-usage widget (and auto-compaction) functional instead
     // of assuming an unbounded window.
-    const FALLBACK_MAX_INPUT_TOKENS = 32768;
+    const FALLBACK_CONTEXT_TOKENS = 32768;
 
     const config = vscode.workspace.getConfiguration('lmstudio-copilot');
     const configuredMaxInputTokens = config.get<number>('maxInputTokens', 1048576);
-    const maxOutputTokens = config.get<number>('maxOutputTokens', 32663);
+    const configuredMaxOutputTokens = config.get<number>('maxOutputTokens', 16384);
     const enableToolCalling = config.get<boolean>('enableToolCalling', true);
 
-    return this.availableModels.map(model => ({
-      id: model.id,
-      name: this.getDisplayName(model),
-      family: 'lmstudio',
-      version: '1.0.0',
-      // Report the model's real context window (capped by the user setting).
-      // The default cap is 1M so models that advertise e.g. 256K are not
-      // clamped to a smaller number.
-      maxInputTokens: typeof model.max_context_length === 'number' && model.max_context_length > 0
-        ? Math.min(configuredMaxInputTokens, model.max_context_length)
-        : Math.min(configuredMaxInputTokens, FALLBACK_MAX_INPUT_TOKENS),
-      maxOutputTokens,
-      lmstudioModelId: model.id,
-      isLoaded: Boolean(model.loaded),
-      isUserSelectable: true,
-      capabilities: {
-        toolCalling: enableToolCalling,
-        imageInput: model.capabilities?.vision ?? false,
-      },
-    }));
+    return this.availableModels.map(model => {
+      const contextLength = typeof model.max_context_length === 'number' && model.max_context_length > 0
+        ? model.max_context_length
+        : FALLBACK_CONTEXT_TOKENS;
+      const safeOutputLimit = Number.isFinite(configuredMaxOutputTokens) && configuredMaxOutputTokens > 0
+        ? Math.floor(configuredMaxOutputTokens)
+        : 16384;
+      const maxOutputTokens = Math.min(safeOutputLimit, Math.max(1, Math.floor(contextLength / 2)));
+      const safeInputLimit = Number.isFinite(configuredMaxInputTokens) && configuredMaxInputTokens > 0
+        ? Math.floor(configuredMaxInputTokens)
+        : FALLBACK_CONTEXT_TOKENS;
+      const maxInputTokens = Math.max(1, Math.min(safeInputLimit, contextLength - maxOutputTokens));
+
+      this.log(
+        `Context budget for ${model.id}: context=${contextLength}, input=${maxInputTokens}, output=${maxOutputTokens}` +
+        (typeof model.max_context_length === 'number' && model.max_context_length > 0 ? '' : ' (fallback context)'),
+      );
+
+      return {
+        id: model.id,
+        name: this.getDisplayName(model),
+        family: 'lmstudio',
+        version: '1.0.0',
+        maxInputTokens,
+        maxOutputTokens,
+        lmstudioModelId: model.id,
+        isLoaded: Boolean(model.loaded),
+        isUserSelectable: true,
+        capabilities: {
+          toolCalling: enableToolCalling,
+          imageInput: model.capabilities?.vision ?? false,
+        },
+      };
+    });
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -273,6 +288,7 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     token: vscode.CancellationToken
   ): Promise<void> {
     const modelId = model.lmstudioModelId;
+    let requestModel = model;
     this.log(`Chat request for ${modelId} | ${messages.length} messages | ${options.tools?.length ?? 0} tools`);
 
     const ready = await this.client.ensureModelLoaded(modelId);
@@ -282,6 +298,10 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
 
     if (!model.isLoaded) {
       await this.refreshModels();
+      const refreshedInformation = this.provideLanguageModelChatInformation({ silent: false }, token);
+      if (Array.isArray(refreshedInformation)) {
+        requestModel = refreshedInformation.find((availableModel) => availableModel.id === modelId) ?? model;
+      }
     }
 
     // Short-circuit: if the last message is a tool result from a "terminal"
@@ -338,7 +358,7 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     }
 
     // 3. Convert tools → OpenAI format (with budget limit)
-    const tools = this.convertTools(options.tools, messages);
+    const tools = await this.convertTools(options.tools, messages, openaiMessages, requestModel);
 
     // 4. Set up cancellation
     token.onCancellationRequested(() => this.client.cancelRequest(requestId));
@@ -347,12 +367,18 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
     this.requestDedupSet.clear();
 
     // 6. Stream the response
+    const requestedOutputTokens = options.modelOptions?.maxOutputTokens;
+    const maxTokens = typeof requestedOutputTokens === 'number'
+      && Number.isFinite(requestedOutputTokens)
+      && requestedOutputTokens > 0
+      ? Math.min(Math.floor(requestedOutputTokens), requestModel.maxOutputTokens)
+      : requestModel.maxOutputTokens;
     const stream = this.client.streamChatCompletionWithTools(
       modelId,
       openaiMessages,
       {
         temperature: options.modelOptions?.temperature as number | undefined,
-        maxTokens: options.modelOptions?.maxOutputTokens as number | undefined,
+        maxTokens,
         tools,
       },
       requestId
@@ -630,64 +656,174 @@ export class LMStudioProvider implements vscode.LanguageModelChatProvider<LMStud
   }
 
   /**
-   * Convert and optionally limit the number of tools sent to the model.
-   *
-   * Local models degrade badly with 50+ tools — wrong names, hallucinated
-   * parameters, context overflow. We prioritise:
-   *   1. Tools already referenced in the conversation (must keep for coherence)
-   *   2. Our own lmstudio_* tools
-   *   3. Shorter/simpler-named tools (less likely to be mangled)
-   *   4. Alphabetical as tiebreaker
+   * Select the most useful tool schemas that fit the request's remaining
+   * estimated input budget. VS Code does not expose a tokenizer for schemas,
+   * so the estimate uses serialized schema size at roughly four characters
+   * per token and is intentionally conservative.
    */
-  private convertTools(
+  private async convertTools(
     tools: readonly vscode.LanguageModelChatTool[] | undefined,
-    messages?: readonly vscode.LanguageModelChatRequestMessage[]
-  ): ChatTool[] | undefined {
+    messages: readonly vscode.LanguageModelChatRequestMessage[],
+    openaiMessages: ChatMessage[],
+    model: LMStudioModelInfo,
+  ): Promise<ChatTool[] | undefined> {
     if (!tools?.length) return undefined;
 
     const config = vscode.workspace.getConfiguration('lmstudio-copilot');
-    const maxTools = config.get<number>('maxTools', 20);
+    const configuredMaxTools = config.get<number>('maxTools', 20);
+    const inspectedMaxTools = config.inspect<number>('maxTools');
+    const settings = {
+      default: inspectedMaxTools?.defaultValue,
+      user: inspectedMaxTools?.globalValue,
+      workspace: inspectedMaxTools?.workspaceValue,
+      folder: inspectedMaxTools?.workspaceFolderValue,
+      userLanguage: inspectedMaxTools?.globalLanguageValue,
+      workspaceLanguage: inspectedMaxTools?.workspaceLanguageValue,
+      folderLanguage: inspectedMaxTools?.workspaceFolderLanguageValue,
+    };
+    const validMaxTools = Number.isFinite(configuredMaxTools) && configuredMaxTools >= 0;
+    const maxTools = validMaxTools ? Math.floor(configuredMaxTools) : 20;
+    if (!validMaxTools) {
+      this.warn(`Invalid maxTools value ${configuredMaxTools}; using default count limit 20`);
+    }
+    this.log(`maxTools configuration=${JSON.stringify(settings)}; configured=${configuredMaxTools}; effective=${maxTools}; count limit=${maxTools === 0 ? 'unlimited' : maxTools}`);
 
-    let selectedTools: readonly vscode.LanguageModelChatTool[] = tools;
+    const usedToolNames = new Set<string>();
+    for (const message of messages) {
+      const parts = Array.isArray(message.content) ? message.content : [];
+      for (const part of parts) {
+        if (part instanceof vscode.LanguageModelToolCallPart) {
+          usedToolNames.add(part.name);
+        }
+      }
+    }
 
-    if (maxTools > 0 && tools.length > maxTools) {
-      // Collect tool names already used in conversation history
-      const usedToolNames = new Set<string>();
-      if (messages) {
-        for (const msg of messages) {
-          const parts = Array.isArray(msg.content) ? msg.content : [];
-          for (const p of parts) {
-            if (p instanceof vscode.LanguageModelToolCallPart) usedToolNames.add(p.name);
+    const queryText = messages
+      .filter((message) => this.isUserRole(message.role))
+      .slice(-2)
+      .map((message) => this.extractMessageContent(message))
+      .join(' ')
+      .toLowerCase();
+    const queryTerms = new Set(queryText.match(/[\p{L}\p{N}]{2,}/gu) ?? []);
+    const candidates: Array<{ name: string; tool: ChatTool; cost: number; score: number; required: boolean }> = [];
+    let invalidCount = 0;
+
+    for (const tool of tools) {
+      try {
+        const chatTool: ChatTool = {
+          type: 'function',
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: normalizeToolParameters(tool.inputSchema),
+          },
+        };
+        const descriptionTerms = new Set(
+          `${tool.name} ${tool.description}`.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [],
+        );
+        let relevance = 0;
+        for (const term of queryTerms) {
+          if (descriptionTerms.has(term)) relevance += 1;
+        }
+        const cost = Math.ceil(JSON.stringify(chatTool).length / 4) + 8;
+        candidates.push({
+          name: tool.name,
+          tool: chatTool,
+          cost,
+          score: relevance,
+          required: usedToolNames.has(tool.name),
+        });
+      } catch (error) {
+        invalidCount += 1;
+        const source = this.getToolSource(tool);
+        this.warn(
+          `Excluding tool with incompatible schema from MCP server "${source.server}", tool "${source.tool}": ${error}`,
+        );
+      }
+    }
+
+    const promptTokens = this.estimateChatMessagesTokens(openaiMessages);
+    const availableSchemaTokens = Math.max(0, model.maxInputTokens - promptTokens);
+    const required = candidates.filter((candidate) => candidate.required);
+    const optional = candidates
+      .filter((candidate) => !candidate.required)
+      .sort((left, right) => {
+        const leftEfficiency = left.score / left.cost;
+        const rightEfficiency = right.score / right.cost;
+        return rightEfficiency - leftEfficiency || right.score - left.score || left.name.localeCompare(right.name);
+      });
+
+    const selected: typeof candidates = [];
+    let usedSchemaTokens = 0;
+    const addCandidate = (candidate: (typeof candidates)[number], enforceCount: boolean): void => {
+      if (enforceCount && maxTools > 0 && selected.length >= maxTools) return;
+      if (usedSchemaTokens + candidate.cost > availableSchemaTokens) return;
+      selected.push(candidate);
+      usedSchemaTokens += candidate.cost;
+    };
+    for (const candidate of required) {
+      addCandidate(candidate, false);
+    }
+    for (const candidate of optional) {
+      addCandidate(candidate, true);
+    }
+
+    const excluded = tools.length - selected.length;
+    this.log(
+      `Tool budget: available=${tools.length}, selected=${selected.length}, excluded=${excluded}, ` +
+      `invalid=${invalidCount}, prompt≈${promptTokens} tokens, schemas≈${usedSchemaTokens}/${availableSchemaTokens} tokens`,
+    );
+    if (required.some((candidate) => !selected.includes(candidate))) {
+      this.warn('One or more previously used tools could not fit in the remaining input-token budget');
+    }
+    if (promptTokens > model.maxInputTokens) {
+      this.warn(`Estimated prompt (${promptTokens} tokens) exceeds the model input budget (${model.maxInputTokens} tokens)`);
+    }
+
+    return selected.map((candidate) => candidate.tool);
+  }
+
+  private getToolSource(tool: vscode.LanguageModelChatTool): { server: string; tool: string } {
+    const metadata = tool as vscode.LanguageModelChatTool & {
+      serverName?: unknown;
+      mcpServerName?: unknown;
+      server?: unknown;
+    };
+    const serverName = typeof metadata.serverName === 'string'
+      ? metadata.serverName
+      : typeof metadata.mcpServerName === 'string'
+        ? metadata.mcpServerName
+        : typeof metadata.server === 'string'
+          ? metadata.server
+          : typeof metadata.server === 'object' && metadata.server !== null && 'name' in metadata.server
+            && typeof metadata.server.name === 'string'
+            ? metadata.server.name
+            : 'not exposed by VS Code';
+    return { server: serverName, tool: tool.name };
+  }
+
+  private estimateChatMessagesTokens(messages: ChatMessage[]): number {
+    let tokens = 0;
+    for (const message of messages) {
+      let characters = 0;
+      let imageTokens = 0;
+      if (typeof message.content === 'string') {
+        characters += message.content.length;
+      } else if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.type === 'text') {
+            characters += part.text.length;
+          } else {
+            imageTokens += 4000;
           }
         }
       }
-
-      const scored = tools.map(t => {
-        let score = 0;
-        if (usedToolNames.has(t.name)) score += 1000;   // must-keep
-        if (t.name.startsWith('lmstudio_')) score += 100; // our tools
-        // Penalise long / complex names (MCP tools with multiple underscores)
-        score -= (t.name.match(/_/g)?.length ?? 0) * 5;
-        score -= Math.floor(t.name.length / 10) * 3;
-        return { tool: t, score };
-      });
-
-      scored.sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name));
-      selectedTools = scored.slice(0, maxTools).map(s => s.tool);
-
-      const dropped = tools.length - selectedTools.length;
-      this.log(`Tool budget: ${tools.length} available → sending ${selectedTools.length} (dropped ${dropped})`);
-      this.log(`Kept: ${selectedTools.map(t => t.name).join(', ')}`);
+      if (message.tool_calls) {
+        characters += JSON.stringify(message.tool_calls).length;
+      }
+      tokens += Math.ceil(characters / 4) + imageTokens + 4;
     }
-
-    return selectedTools.map(t => ({
-      type: 'function' as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.inputSchema as Record<string, unknown>,
-      },
-    }));
+    return tokens;
   }
 
   private mapRole(role: vscode.LanguageModelChatMessageRole | string): 'system' | 'user' | 'assistant' {

@@ -16,3 +16,6 @@ tsconfig.json
 .github/**
 .chatgpt-workspace-exposure-mcp/**
 instance.lock
+hashcat_sessions.db*
+
+*.vsix

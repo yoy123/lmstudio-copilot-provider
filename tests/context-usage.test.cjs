@@ -12,9 +12,24 @@ const defaults = Object.fromEntries(manifest.contributes.configuration.flatMap(s
   Object.entries(section.properties).map(([key, value]) => [key.split('.').pop(), value.default])
 ));
 let settings;
+let configuredScopes;
+const logs = [];
 const vscode = {
   version: '1.143.1',
-  workspace: { getConfiguration: () => ({ get: (key, fallback) => settings[key] ?? fallback }) },
+  workspace: {
+    getConfiguration: () => ({
+      get: (key, fallback) => settings[key] ?? fallback,
+      inspect: key => ({
+        defaultValue: defaults[key],
+        globalValue: configuredScopes.global[key],
+        workspaceValue: configuredScopes.workspace[key],
+        workspaceFolderValue: configuredScopes.folder[key],
+        globalLanguageValue: undefined,
+        workspaceLanguageValue: undefined,
+        workspaceFolderLanguageValue: undefined,
+      }),
+    }),
+  },
   EventEmitter: class {
     event = () => ({ dispose() {} });
     fire() {}
@@ -48,11 +63,20 @@ function loadSource(filename) {
 
 const { LMStudioClient } = loadSource('lmstudio-client.ts');
 const { LMStudioProvider } = loadSource('lmstudio-provider.ts');
-const logger = { verbose() {}, warn() {}, error() {} };
+const logger = {
+  verbose(message) { logs.push(['verbose', message]); },
+  warn(message) { logs.push(['warning', message]); },
+  error(message) { logs.push(['error', message]); },
+};
 const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) };
 const originalFetch = global.fetch;
 
-beforeEach(() => { settings = { ...defaults }; vscode.version = '1.143.1'; });
+beforeEach(() => {
+  settings = { ...defaults };
+  configuredScopes = { global: {}, workspace: {}, folder: {} };
+  logs.length = 0;
+  vscode.version = '1.143.1';
+});
 afterEach(() => { global.fetch = originalFetch; });
 
 async function startedServerArgs(serverUrl) {
@@ -110,7 +134,10 @@ test('model context sizes are not all clamped to 128K', async () => {
   const provider = await providerFor([model(1048576, 'large'), model(262144, 'medium'), model(8192, 'small')]);
   const info = provider.provideLanguageModelChatInformation({}, token);
   assert.deepEqual(Object.fromEntries(info.map(m => [m.id, m.maxInputTokens])), {
-    large: 1048576, medium: 262144, small: 8192,
+    large: 1032192, medium: 245760, small: 4096,
+  });
+  assert.deepEqual(Object.fromEntries(info.map(m => [m.id, m.maxOutputTokens])), {
+    large: 16384, medium: 16384, small: 4096,
   });
 });
 
@@ -123,7 +150,7 @@ test('explicit smaller input cap is respected', async () => {
 test('missing, zero, negative and NaN model limits use the 32K fallback', async () => {
   for (const limit of [undefined, 0, -1, NaN]) {
     const provider = await providerFor([model(limit)]);
-    assert.equal(provider.provideLanguageModelChatInformation({}, token)[0].maxInputTokens, 32768);
+    assert.equal(provider.provideLanguageModelChatInformation({}, token)[0].maxInputTokens, 16384);
   }
 });
 
@@ -135,12 +162,22 @@ test('unknown limits also respect a smaller user cap', async () => {
 
 test('live metadata does not erase a known installed context limit', async () => {
   const provider = await providerFor([model(262144)], [model(undefined)]);
-  assert.equal(provider.provideLanguageModelChatInformation({}, token)[0].maxInputTokens, 262144);
+  assert.equal(provider.provideLanguageModelChatInformation({}, token)[0].maxInputTokens, 245760);
 });
 
 test('a smaller live context takes precedence over installed metadata', async () => {
   const provider = await providerFor([model(1048576)], [model(16384)]);
-  assert.equal(provider.provideLanguageModelChatInformation({}, token)[0].maxInputTokens, 16384);
+  const info = provider.provideLanguageModelChatInformation({}, token)[0];
+  assert.equal(info.maxInputTokens, 8192);
+  assert.equal(info.maxOutputTokens, 8192);
+});
+
+test('model switching recalculates both input and output limits', async () => {
+  const provider = await providerFor([model(1048576, 'large'), model(8192, 'small')]);
+  const info = Object.fromEntries(provider.provideLanguageModelChatInformation({}, token).map(item => [item.id, item]));
+  assert.equal(info.large.maxInputTokens, 1032192);
+  assert.equal(info.small.maxInputTokens, 4096);
+  assert.equal(info.small.maxOutputTokens, 4096);
 });
 
 test('API discovery uses the smallest valid loaded-instance context', async () => {
@@ -254,6 +291,102 @@ test('chat requests opt into streaming usage', async () => {
   };
   await collect(new LMStudioClient(logger).streamChatCompletionWithTools('test-model', [{ role: 'user', content: 'Hello' }]));
   assert.deepEqual(request.stream_options, { include_usage: true });
+});
+
+test('chat requests refresh context limits after lazy-loading an unloaded model', async () => {
+  let sentOptions;
+  const provider = new LMStudioProvider({
+    ensureModelLoaded: async () => true,
+    getInstalledModels: async () => [model(32768)],
+    getModels: async () => [model(32768)],
+    async *streamChatCompletionWithTools(_modelId, _messages, options) {
+      sentOptions = options;
+      yield { text: 'Ready' };
+    },
+  }, {}, logger);
+  const parts = [];
+
+  await provider.provideLanguageModelChatResponse({
+    ...model(8192),
+    lmstudioModelId: 'test-model',
+    maxInputTokens: 4096,
+    maxOutputTokens: 4096,
+    isLoaded: false,
+    isUserSelectable: true,
+    name: 'test-model',
+    family: 'lmstudio',
+    version: '1.0.0',
+    capabilities: { toolCalling: true },
+  }, [], { modelOptions: { maxOutputTokens: 20000 } }, { report: part => parts.push(part) }, token);
+
+  assert.equal(sentOptions.maxTokens, 16384);
+  assert.equal(parts[0].value, 'Ready');
+});
+
+function makeTool(name, description = name, inputSchema = { type: 'object', properties: {} }) {
+  return { name, description, inputSchema };
+}
+
+async function convertedTools(tools, { maxInputTokens = 10000, maxTools = 20, messages = [], openaiMessages = [] } = {}) {
+  settings.maxTools = maxTools;
+  const provider = new LMStudioProvider({}, {}, logger);
+  return provider.convertTools(tools, messages, openaiMessages, { maxInputTokens });
+}
+
+test('zero removes the tool-count cap while the token budget still limits large collections', async () => {
+  const tools = Array.from({ length: 96 }, (_, index) =>
+    makeTool(`mcp_tool_${index}`, `tool description ${index}`));
+  const selected = await convertedTools(tools, { maxInputTokens: 10000, maxTools: 0 });
+  assert.ok(selected.length > 32);
+  assert.ok(selected.length <= tools.length);
+  assert.ok(logs.some(([, message]) => message.includes('count limit=unlimited')));
+
+  logs.length = 0;
+  const smallContext = await convertedTools(tools, { maxInputTokens: 300, maxTools: 0 });
+  assert.ok(smallContext.length < tools.length);
+  assert.ok(logs.some(([, message]) => message.includes('available=96') && message.includes('excluded=')));
+});
+
+test('positive maxTools limits ordinary tools but keeps a tool used in the conversation', async () => {
+  const usedCall = new vscode.LanguageModelToolCallPart('call-1', 'required_tool', {});
+  const messages = [{ role: 2, content: [usedCall] }];
+  const tools = [
+    makeTool('required_tool'),
+    makeTool('other_tool'),
+    makeTool('third_tool'),
+  ];
+  const selected = await convertedTools(tools, { maxInputTokens: 10000, maxTools: 1, messages });
+  assert.deepEqual(selected.map(item => item.function.name), ['required_tool']);
+});
+
+test('tool selection favors current user-task relevance within the schema budget', async () => {
+  const tools = [
+    makeTool('weather_lookup', 'fetch current weather forecast'),
+    makeTool('file_reader', 'read a file from the workspace'),
+  ];
+  const messages = [{ role: 1, content: [new vscode.LanguageModelTextPart('Please inspect the workspace file')] }];
+  const selected = await convertedTools(tools, { maxInputTokens: 10000, maxTools: 1, messages });
+  assert.deepEqual(selected.map(item => item.function.name), ['file_reader']);
+});
+
+test('incompatible MCP schemas are excluded and diagnostics identify available server metadata', async () => {
+  const brokenTool = Object.assign(makeTool('broken_tool', 'broken', {
+    type: 'object',
+    properties: { value: { $ref: '#/$defs/missing' } },
+  }), { serverName: 'mcp-server-a' });
+  const selected = await convertedTools([brokenTool], { maxInputTokens: 10000 });
+  assert.deepEqual(selected, []);
+  assert.ok(logs.some(([, message]) =>
+    message.includes('MCP server "mcp-server-a"') && message.includes('tool "broken_tool"')));
+});
+
+test('workspace maxTools overrides are reported without changing the configured value', async () => {
+  configuredScopes.global.maxTools = 32;
+  configuredScopes.workspace.maxTools = 0;
+  settings.maxTools = 0;
+  await convertedTools([makeTool('one')], { maxInputTokens: 10000, maxTools: 0 });
+  assert.ok(logs.some(([, message]) =>
+    message.includes('"user":32') && message.includes('"workspace":0') && message.includes('effective=0')));
 });
 
 for (const [version, supported] of [['1.104.0', false], ['1.139.9', false], ['1.140.0', true], ['1.143.1', true], ['1.144.0-insider', true], ['2.0.0', true]]) {

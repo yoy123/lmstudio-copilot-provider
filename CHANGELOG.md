@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.30.12] - 2026-11-16
+
+- Inline local JSON Schema references in MCP tool inputs and exclude malformed or recursive schemas with source diagnostics instead of weakening their constraints.
+- Budget tool definitions against estimated remaining model input capacity, rank by recent user-task relevance, retain previously used tools when they fit, and clarify `maxTools: 0`.
+- Reserve output capacity when reporting model input limits and report the effective tool configuration across VS Code settings scopes.
+- Document that provider-side filtering cannot fix Copilot static-context failures that happen before the provider is invoked.
+
+## [1.30.10] - 2026-11-15
+
+- Preserve LM Studio's default server port when no port is explicitly configured.
+- Fall back to OpenAI-compatible model discovery and skip LM Studio CLI loading for compatible local servers.
+- Exclude local session databases from release packages.
+
 ## [1.30.9] - 2026-11-01
 
 - Honor model-specific context limits up to a configurable 1M-token cap, retain installed-model context metadata when live metadata omits it, and use a 32K fallback for unknown limits (PR #69).

@@ -108,7 +108,7 @@ Most users can leave the defaults alone. These are the settings that matter most
 - `lmstudio-copilot.autoStartServer`: Start LM Studio automatically when the extension activates
 - `lmstudio-copilot.launchCommand`: Fallback terminal command if CLI-based startup is unavailable
 - `lmstudio-copilot.enableToolCalling`: Enable tool calling for supported models
-- `lmstudio-copilot.maxTools`: Limit the number of tools exposed per request
+- `lmstudio-copilot.maxTools`: Per-request tool count cap; `0` removes only the count cap, not the context-token budget
 - `lmstudio-copilot.enableInlineCompletions`: Enable experimental inline completion suggestions
 - `lmstudio-copilot.inlineCompletionModel`: Optional model ID for inline suggestions (blank = auto-pick)
 - `lmstudio-copilot.imageGenEndpointUrl`: Base URL for DALL-E/OpenAI-compatible or A1111 image generation
@@ -208,10 +208,12 @@ Then run **Developer: Reload Window**.
 
 ### Context limits and session usage
 
-`lmstudio-copilot.maxInputTokens` caps the input window advertised to Copilot.
-Its default is 1,048,576 tokens, but each model's reported context length still
-limits that value. Models without context metadata use a conservative 32,768-token
-fallback. An explicit smaller setting is always respected.
+`lmstudio-copilot.maxInputTokens` caps the prompt tokens advertised to Copilot.
+Its default is 1,048,576 tokens, but the model's reported context length and
+reserved output capacity limit the effective input budget. The configured
+`maxOutputTokens` is capped to half of the model's context window so small
+contexts retain room for prompts and tools. Models without context metadata use
+a conservative 32,768-token fallback.
 
 A model's supported context maximum is not necessarily its loaded context size.
 Check the context configured in LM Studio before increasing this setting; the
@@ -221,6 +223,46 @@ On VS Code 1.140 and later, token usage returned by LM Studio is forwarded to
 Copilot's session accounting. Older VS Code versions skip that data part for
 compatibility. If the server does not return usage, the extension does not invent
 counts. Increasing the context cap alone does not enable usage reporting.
+
+### MCP tool schemas and context budgets
+
+Before sending tool schemas to LM Studio, the extension inlines local JSON
+Schema references from `definitions` and `$defs`, including nested references
+and escaped JSON Pointer names. A schema with an unresolved, external, or
+circular reference is excluded individually and reported in the LM Studio
+output channel; it is not replaced with a permissive schema. The diagnostic
+identifies the MCP server when VS Code exposes that metadata, otherwise it
+names the tool and states that the server identity is unavailable.
+
+Tool selection is recalculated from the tools VS Code provides on each request.
+Previously used tools and tools whose names/descriptions match recent user
+messages are prioritized. `lmstudio-copilot.maxTools` is a count cap (default
+20); `0` removes that count cap, but schemas are still selected only while the
+estimated prompt-plus-schema size fits the remaining input budget. The estimate
+uses serialized schema size at roughly four characters per token and is not an
+exact LM Studio tokenizer measurement. Tools already used in a conversation are prioritized, but a tool cannot be
+retained if its schema cannot fit in the remaining budget. Schemas are
+recomputed and sent with each LM Studio chat request because the chat-completion
+API is stateless.
+
+VS Code workspace or folder settings override user settings. The provider logs
+the default, user, workspace, and folder values it can inspect, along with the
+effective `maxTools` setting and selected/excluded counts. Use the setting scope
+where you want the override to apply.
+
+### Copilot SDK context limitations
+
+The provider can filter schemas only after VS Code invokes it and supplies the
+request's tool list. It has no supported deferred MCP discovery or hook to
+remove Copilot's static instructions/tool definitions before Copilot validates
+its own context. Therefore, a `compaction_static_context_blocked` failure that
+happens before the provider runs cannot be fixed by this extension's
+request-time tool budget. For large MCP collections, use a smaller MCP profile
+or disable unrelated servers/tools in VS Code; keep the larger profile
+available to restore when needed. The VS Code API exposes a maximum tool-count
+capability, but it does not provide this provider a reliable way to dynamically
+discover omitted MCP tools before context validation, so the extension does not
+claim that capability solves the upstream limit.
 
 ### Gemma reasoning text appears in chat
 
