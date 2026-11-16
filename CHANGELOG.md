@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.30.9] - 2026-11-01
 
 - Honor model-specific context limits up to a configurable 1M-token cap, retain installed-model context metadata when live metadata omits it, and use a 32K fallback for unknown limits (PR #69).
 - Forward LM Studio's streamed prompt/completion usage to Copilot session accounting on VS Code 1.140 and later (PR #69).
