@@ -55,6 +55,28 @@ const originalFetch = global.fetch;
 beforeEach(() => { settings = { ...defaults }; vscode.version = '1.143.1'; });
 afterEach(() => { global.fetch = originalFetch; });
 
+async function startedServerArgs(serverUrl) {
+  settings.serverUrl = serverUrl;
+  const client = new LMStudioClient(logger);
+  let startedArgs;
+  client.checkConnection = async () => false;
+  client.resolveCliPath = async () => 'lms';
+  client.execLms = async () => ({ stdout: '', stderr: '', exitCode: 0 });
+  client.execLmsJson = async () => ({ running: false });
+  client.spawnDetachedLms = async args => { startedArgs = args; return true; };
+  client.waitForConnection = async () => true;
+  assert.equal(await client.ensureServerRunning(), true);
+  return startedArgs;
+}
+
+test('server startup leaves the port unspecified when the server URL omits it', async () => {
+  assert.deepEqual(await startedServerArgs('http://localhost'), ['server', 'start']);
+});
+
+test('server startup uses an explicitly configured URL port', async () => {
+  assert.deepEqual(await startedServerArgs('http://localhost:5678'), ['server', 'start', '--port', '5678']);
+});
+
 function model(max_context_length, id = 'test-model') {
   return { id, object: 'model', owned_by: 'test', loaded: true, max_context_length };
 }
