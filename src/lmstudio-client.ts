@@ -441,7 +441,10 @@ export class LMStudioClient {
     const serverStatus = await this.execLmsJson<{ running?: boolean; port?: number }>(['server', 'status', '--json'], 5000);
     if (!serverStatus?.running) {
       const url = this.parseServerUrl();
-      const args = ['server', 'start', '--port', String(url?.port || 1234)];
+      const args = ['server', 'start'];
+      if (url?.port) {
+        args.push('--port', url.port);
+      }
       if (url && !['localhost', '127.0.0.1'].includes(url.hostname)) {
         args.push('--bind', url.hostname);
       }
